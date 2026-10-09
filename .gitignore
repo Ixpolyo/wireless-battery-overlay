@@ -1,0 +1,14 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local config (created at runtime in %LOCALAPPDATA%\BatteryOverlay)
+config.json
