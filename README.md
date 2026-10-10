@@ -95,7 +95,10 @@ keyboard label is the `KEYBOARD_LABEL` constant in the same file.
 - The **remaining runtime** is estimated from the discharge observed over the
   last few hours (the history is kept for 24 hours and survives a restart). The
   voltage (available for both devices) gives a finer signal than the integer
-  percentage, so the estimate appears much sooner.
+  percentage, so the estimate appears much sooner. When no discharge has been
+  measured yet (battery on a flat plateau, first run), a rough nominal runtime
+  is shown instead, in a dimmed colour; the measured value replaces it as soon
+  as a trend is detected.
 
 The overlay reads the devices every 10 seconds in background threads and only
 repaints when a value actually changes.

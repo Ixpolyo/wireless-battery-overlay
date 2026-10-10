@@ -96,7 +96,10 @@ Le libellé du clavier est la constante `KEYBOARD_LABEL` du même fichier.
 - L'**autonomie restante** est estimée à partir de la décharge observée sur les
   dernières heures (l'historique est conservé 24 h et survit à un redémarrage).
   La tension (disponible pour les deux périphériques) offre un signal plus fin
-  que le pourcentage entier, l'estimation apparaît donc bien plus tôt.
+  que le pourcentage entier, l'estimation apparaît donc bien plus tôt. Tant
+  qu'aucune décharge n'a encore été mesurée (batterie sur un palier, première
+  utilisation), une autonomie nominale approximative est affichée en couleur
+  estompée ; la valeur mesurée la remplace dès qu'une tendance est détectée.
 
 L'overlay lit les périphériques toutes les 10 secondes dans des threads
 d'arrière-plan et ne redessine que lorsqu'une valeur change réellement.

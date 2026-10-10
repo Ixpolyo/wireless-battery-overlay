@@ -56,9 +56,13 @@ HISTORY_SAVE_INTERVAL = 60    # sauvegarde du fichier au plus toutes les 60 s
 
 EMPTY_MV = 3400               # tension approximative d'une cellule Li-Po vide
 MIN_VOLT_POINTS = 2           # nb mini de points pour estimer via la tension
-MIN_VOLT_SPAN = 180           # duree mini (s) pour estimer via la tension
-MIN_VOLT_DROP = 2             # chute mini (mV) pour estimer via la tension
+MIN_VOLT_SPAN = 120           # duree mini (s) pour estimer via la tension
+MIN_VOLT_DROP = 1             # chute mini (mV) pour estimer via la tension
 MAX_REMAINING = 300 * 3600    # au-dela : estimation non credible (300 h)
+
+# Autonomie nominale (heures) a 100 %, utilisee UNIQUEMENT tant qu'aucune
+# decharge n'a encore ete mesuree (batterie sur un palier, premiere utilisation).
+NOMINAL_HOURS = {"kb": 30.0, "mouse": 60.0}
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +367,13 @@ class Overlay:
         self._set_bar(ui, percent, color)
 
         if show_estimate and not charging:
-            secs = self._estimate_for(ui, percent, data.get("voltage_mv"))
+            secs, measured = self._estimate_for(ui, percent,
+                                                data.get("voltage_mv"))
             if secs is None:
                 text, fg = "≈ …", DIM
             else:
-                text, fg = "≈" + _format_duration(secs), FG
+                # Valeur mesuree : claire. Valeur nominale (repli) : estompee.
+                text, fg = "≈" + _format_duration(secs), (FG if measured else DIM)
         else:
             text = f"{percent}%"
             if charging:
@@ -379,22 +385,24 @@ class Overlay:
             ui["_txt"] = (text, fg)
 
     def _estimate_for(self, ui, percent, voltage):
-        """Estimation courante, avec repli sur la derniere estimation connue.
+        """Estimation courante -> (secondes, mesuree?) ou (None, False).
 
-        Le repli permet d'afficher une valeur des le demarrage (avant que
-        l'historique de la session ait de nouveau assez de points), mise a
-        l'echelle du niveau de charge actuel.
+        Ordre : decharge mesuree, puis derniere decharge connue (mise a
+        l'echelle du niveau actuel), puis autonomie nominale de secours.
         """
         key = ui["key"]
         secs = estimate_remaining(self.hist.get(key, []), percent, voltage)
         if secs is not None:
             self.last_est[key] = [secs, percent, time.time()]
             self._history_dirty = True
-            return secs
+            return secs, True
         last = self.last_est.get(key)
         if last and len(last) >= 2 and last[1]:
-            return last[0] * percent / last[1]
-        return None
+            return last[0] * percent / last[1], True
+        nominal = NOMINAL_HOURS.get(key)
+        if nominal and percent:
+            return nominal * 3600 * percent / 100, False
+        return None, False
 
     def _update_display(self):
         with self._lock:
