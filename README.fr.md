@@ -94,9 +94,9 @@ Le libellé du clavier est la constante `KEYBOARD_LABEL` du même fichier.
   `response[6]` est le pourcentage, `response[7]` l'indicateur filaire et
   `response[8:10]` la tension batterie en millivolts.
 - L'**autonomie restante** est estimée à partir de la décharge observée sur les
-  dernières heures. La tension (disponible pour les deux périphériques) offre un
-  signal plus fin que le pourcentage entier, l'estimation apparaît donc bien
-  plus tôt.
+  dernières heures (l'historique est conservé 24 h et survit à un redémarrage).
+  La tension (disponible pour les deux périphériques) offre un signal plus fin
+  que le pourcentage entier, l'estimation apparaît donc bien plus tôt.
 
 L'overlay lit les périphériques toutes les 10 secondes dans des threads
 d'arrière-plan et ne redessine que lorsqu'une valeur change réellement.

@@ -51,11 +51,12 @@ RED = "#ff3b30"
 BLUE = "#0a84ff"
 
 HOVER_SECONDS = 1.0           # duree de survol avant d'afficher l'autonomie
-HISTORY_WINDOW = 6 * 3600     # fenetre d'historique conservee (6 h)
+HISTORY_WINDOW = 24 * 3600    # fenetre d'historique conservee (24 h)
 HISTORY_SAVE_INTERVAL = 60    # sauvegarde du fichier au plus toutes les 60 s
 
 EMPTY_MV = 3400               # tension approximative d'une cellule Li-Po vide
-MIN_VOLT_SPAN = 300           # duree mini (s) pour estimer via la tension
+MIN_VOLT_POINTS = 2           # nb mini de points pour estimer via la tension
+MIN_VOLT_SPAN = 180           # duree mini (s) pour estimer via la tension
 MIN_VOLT_DROP = 2             # chute mini (mV) pour estimer via la tension
 MAX_REMAINING = 300 * 3600    # au-dela : estimation non credible (300 h)
 
@@ -94,6 +95,23 @@ def _format_duration(seconds):
     return "<1min"
 
 
+def _trend(points, index):
+    """Pente par seconde d'une serie (par moindres carres). None si inderterminee."""
+    n = len(points)
+    if n < 2:
+        return None
+    t0 = points[0][0]
+    xs = [p[0] - t0 for p in points]
+    ys = [p[index] for p in points]
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    denom = sum((x - mx) ** 2 for x in xs)
+    if denom == 0:
+        return None
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return num / denom
+
+
 def estimate_remaining(history, percent, voltage=None, now=None):
     """Estime le temps d'autonomie restant (en secondes) ou None si inconnu.
 
@@ -102,6 +120,9 @@ def estimate_remaining(history, percent, voltage=None, now=None):
     1. la tension (si connue) : sa variation est plus fine que le pourcentage
        entier, ce qui donne une estimation beaucoup plus rapidement ;
     2. le pourcentage : (baisse de %) / (duree ecoulee) sur la fenetre.
+
+    La pente est calculee par regression lineaire (plus robuste au bruit qu'un
+    simple premier/dernier point).
     """
     now = now if now is not None else time.time()
     pts = [p for p in history if now - p[0] <= HISTORY_WINDOW]
@@ -111,28 +132,28 @@ def estimate_remaining(history, percent, voltage=None, now=None):
     # 1) estimation par la tension
     if voltage is not None:
         pv = [p for p in pts if len(p) > 2 and p[2] is not None]
-        if len(pv) >= 2:
+        if len(pv) >= MIN_VOLT_POINTS:
             span = pv[-1][0] - pv[0][0]
-            drop_mv = pv[0][2] - pv[-1][2]
-            if span >= MIN_VOLT_SPAN and drop_mv >= MIN_VOLT_DROP:
-                remaining = (voltage - EMPTY_MV) / (drop_mv / span)
-                if 0 < remaining <= MAX_REMAINING:
-                    return remaining
+            if span >= MIN_VOLT_SPAN and pv[0][2] - pv[-1][2] >= MIN_VOLT_DROP:
+                slope = _trend(pv, 2)            # mV par seconde (< 0 si decharge)
+                if slope is not None and slope < 0:
+                    remaining = (voltage - EMPTY_MV) / (-slope)
+                    if 0 < remaining <= MAX_REMAINING:
+                        return remaining
 
     # 2) repli sur le pourcentage
     if percent is None:
         return None
     pp = [p for p in pts if p[1] is not None]
-    if len(pp) < 2:
-        return None
-    span = pp[-1][0] - pp[0][0]
-    drop = pp[0][1] - pp[-1][1]
-    if span < 60 or drop <= 0:
-        return None
-    remaining = percent / (drop / span)
-    if remaining > MAX_REMAINING:
-        return None
-    return remaining
+    if len(pp) >= 2:
+        span = pp[-1][0] - pp[0][0]
+        if span >= 60 and pp[0][1] - pp[-1][1] > 0:
+            slope = _trend(pp, 1)                # % par seconde (< 0 si decharge)
+            if slope is not None and slope < 0:
+                remaining = percent / (-slope)
+                if remaining <= MAX_REMAINING:
+                    return remaining
+    return None
 
 
 def autostart_command():
@@ -227,6 +248,7 @@ class Overlay:
     def __init__(self):
         self.cfg = load_config()
         self.hist = self.cfg.get("history", {}) or {}
+        self.last_est = self.cfg.get("last_est", {}) or {}
         self._history_dirty = False
         self._last_history_save = time.time()
         self._show_est = False
@@ -234,6 +256,8 @@ class Overlay:
         self._lock = threading.Lock()
         self.kb_value = None
         self.locked = bool(self.cfg.get("locked", False))
+        self._user_moved = False
+        self._target_xy = None
 
         self.kb_reader = LogitechKeyboardReader()
         self.mouse_reader = VxeMouseReader()
@@ -339,9 +363,7 @@ class Overlay:
         self._set_bar(ui, percent, color)
 
         if show_estimate and not charging:
-            secs = estimate_remaining(
-                self.hist.get(ui["key"], []), percent, data.get("voltage_mv")
-            )
+            secs = self._estimate_for(ui, percent, data.get("voltage_mv"))
             if secs is None:
                 text, fg = "≈ …", DIM
             else:
@@ -355,6 +377,24 @@ class Overlay:
         if ui.get("_txt") != (text, fg):
             ui["value"].config(text=text, fg=fg)
             ui["_txt"] = (text, fg)
+
+    def _estimate_for(self, ui, percent, voltage):
+        """Estimation courante, avec repli sur la derniere estimation connue.
+
+        Le repli permet d'afficher une valeur des le demarrage (avant que
+        l'historique de la session ait de nouveau assez de points), mise a
+        l'echelle du niveau de charge actuel.
+        """
+        key = ui["key"]
+        secs = estimate_remaining(self.hist.get(key, []), percent, voltage)
+        if secs is not None:
+            self.last_est[key] = [secs, percent, time.time()]
+            self._history_dirty = True
+            return secs
+        last = self.last_est.get(key)
+        if last and len(last) >= 2 and last[1]:
+            return last[0] * percent / last[1]
+        return None
 
     def _update_display(self):
         with self._lock:
@@ -417,7 +457,7 @@ class Overlay:
                        and voltage != last_v)
             if same_pct and not v_moved and dt < 300:
                 return
-            if same_pct and v_moved and dt < 120:
+            if same_pct and v_moved and dt < 60:
                 return
         hist.append([now, percent, voltage])
         cutoff = now - HISTORY_WINDOW
@@ -429,6 +469,7 @@ class Overlay:
         if (self._history_dirty
                 and now - self._last_history_save >= HISTORY_SAVE_INTERVAL):
             self.cfg["history"] = self.hist
+            self.cfg["last_est"] = self.last_est
             save_config(self.cfg)
             self._history_dirty = False
             self._last_history_save = now
@@ -473,7 +514,22 @@ class Overlay:
             y = 24
         x = max(0, min(int(x), sw - 50))
         y = max(0, min(int(y), sh - 50))
+        self._target_xy = (x, y)
         self.root.geometry(f"+{x}+{y}")
+        # Au demarrage Windows, la fenetre se mappe apres coup et peut retomber
+        # a (0,0) : on reapplique la position quelques instants apres.
+        for delay in (10, 150, 500, 1200):
+            self.root.after(delay, self._reapply_position)
+
+    def _reapply_position(self):
+        if self._user_moved or self._target_xy is None:
+            return
+        x, y = self._target_xy
+        try:
+            self.root.geometry(f"+{x}+{y}")
+            self.root.update_idletasks()
+        except Exception:
+            pass
 
     def _bind_recursive(self, widget):
         widget.bind("<ButtonPress-1>", self._drag_start)
@@ -486,6 +542,7 @@ class Overlay:
     def _drag_start(self, event):
         if self.locked:
             return
+        self._user_moved = True
         self._dx = event.x_root - self.root.winfo_x()
         self._dy = event.y_root - self.root.winfo_y()
 
@@ -569,6 +626,7 @@ class Overlay:
         except Exception:
             pass
         self.cfg["history"] = self.hist
+        self.cfg["last_est"] = self.last_est
         save_config(self.cfg)
         try:
             self.mouse_reader.stop()
