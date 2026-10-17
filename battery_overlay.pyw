@@ -58,11 +58,20 @@ EMPTY_MV = 3400               # tension approximative d'une cellule Li-Po vide
 MIN_VOLT_POINTS = 2           # nb mini de points pour estimer via la tension
 MIN_VOLT_SPAN = 120           # duree mini (s) pour estimer via la tension
 MIN_VOLT_DROP = 1             # chute mini (mV) pour estimer via la tension
-MAX_REMAINING = 300 * 3600    # au-dela : estimation non credible (300 h)
+MAX_REMAINING = 300 * 3600    # borne absolue (s) si le pourcentage est inconnu
 
 # Autonomie nominale (heures) a 100 %, utilisee UNIQUEMENT tant qu'aucune
 # decharge n'a encore ete mesuree (batterie sur un palier, premiere utilisation).
 NOMINAL_HOURS = {"kb": 30.0, "mouse": 60.0}
+
+# Autonomie maximale plausible, pleine charge : borne toute estimation pour
+# ecarter les valeurs absurdes (ex. 200 h a 20 %, soit 1000 h pleine charge).
+MAX_FULL_HOURS = 250.0
+# Une estimation memorisee plus vieille que cela n'est plus reutilisee.
+MAX_EST_AGE = HISTORY_WINDOW          # 24 h
+# Apres la fin de la charge, on garde encore le dernier % "sur batterie" du
+# clavier le temps que la tension de surface retombe.
+CHARGE_SETTLE_SECONDS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +125,8 @@ def _trend(points, index):
     return num / denom
 
 
-def estimate_remaining(history, percent, voltage=None, now=None):
+def estimate_remaining(history, percent, voltage=None, now=None,
+                       max_remaining=None):
     """Estime le temps d'autonomie restant (en secondes) ou None si inconnu.
 
     Deux methodes, dans l'ordre :
@@ -126,9 +136,12 @@ def estimate_remaining(history, percent, voltage=None, now=None):
     2. le pourcentage : (baisse de %) / (duree ecoulee) sur la fenetre.
 
     La pente est calculee par regression lineaire (plus robuste au bruit qu'un
-    simple premier/dernier point).
+    simple premier/dernier point). ``max_remaining`` borne le resultat pour
+    ecarter les estimations non credibles (une pente quasi nulle sur un palier
+    de tension peut sinon donner plusieurs centaines d'heures).
     """
     now = now if now is not None else time.time()
+    limit = max_remaining if max_remaining else MAX_REMAINING
     pts = [p for p in history if now - p[0] <= HISTORY_WINDOW]
     if len(pts) < 2:
         return None
@@ -142,7 +155,7 @@ def estimate_remaining(history, percent, voltage=None, now=None):
                 slope = _trend(pv, 2)            # mV par seconde (< 0 si decharge)
                 if slope is not None and slope < 0:
                     remaining = (voltage - EMPTY_MV) / (-slope)
-                    if 0 < remaining <= MAX_REMAINING:
+                    if 0 < remaining <= limit:
                         return remaining
 
     # 2) repli sur le pourcentage
@@ -155,7 +168,7 @@ def estimate_remaining(history, percent, voltage=None, now=None):
             slope = _trend(pp, 1)                # % par seconde (< 0 si decharge)
             if slope is not None and slope < 0:
                 remaining = percent / (-slope)
-                if remaining <= MAX_REMAINING:
+                if 0 < remaining <= limit:
                     return remaining
     return None
 
@@ -259,6 +272,8 @@ class Overlay:
         self._hover_start = None
         self._lock = threading.Lock()
         self.kb_value = None
+        self.kb_batt_pct = self.cfg.get("kb_batt_pct")
+        self.kb_hold_until = 0.0
         self.locked = bool(self.cfg.get("locked", False))
         self._user_moved = False
         self._target_xy = None
@@ -389,24 +404,55 @@ class Overlay:
 
         Ordre : decharge mesuree, puis derniere decharge connue (mise a
         l'echelle du niveau actuel), puis autonomie nominale de secours.
+        Toute estimation est bornee a MAX_FULL_HOURS pleine charge.
         """
         key = ui["key"]
-        secs = estimate_remaining(self.hist.get(key, []), percent, voltage)
+        cap = (MAX_FULL_HOURS * 3600 * percent / 100
+               if percent else MAX_REMAINING)
+        secs = estimate_remaining(self.hist.get(key, []), percent, voltage,
+                                  max_remaining=cap)
         if secs is not None:
             self.last_est[key] = [secs, percent, time.time()]
             self._history_dirty = True
             return secs, True
         last = self.last_est.get(key)
         if last and len(last) >= 2 and last[1]:
-            return last[0] * percent / last[1], True
+            scaled = last[0] * percent / last[1]
+            age = time.time() - last[2] if len(last) > 2 else 0
+            if 0 < scaled <= cap and age <= MAX_EST_AGE:
+                return scaled, True
         nominal = NOMINAL_HOURS.get(key)
         if nominal and percent:
             return nominal * 3600 * percent / 100, False
         return None, False
 
+    def _kb_charge_adjust(self, kb):
+        """Clavier : en charge, la tension (donc le %) est gonflee.
+
+        On affiche alors le dernier pourcentage mesure hors charge, et on le
+        conserve encore un peu apres le debranchement (la tension de surface
+        met quelques minutes a retomber).
+        """
+        if kb is None or kb.get("percent") is None:
+            return kb
+        now = time.time()
+        if kb.get("plugged"):
+            self.kb_hold_until = now + CHARGE_SETTLE_SECONDS
+        elif now >= self.kb_hold_until:
+            # Hors charge et stabilise : c'est la valeur de reference.
+            if self.kb_batt_pct != kb.get("percent"):
+                self.kb_batt_pct = kb.get("percent")
+                self._history_dirty = True
+            return kb
+        if self.kb_batt_pct is not None:
+            kb = dict(kb)
+            kb["percent"] = self.kb_batt_pct
+        return kb
+
     def _update_display(self):
         with self._lock:
             kb = self.kb_value
+        kb = self._kb_charge_adjust(kb)
 
         # On conserve la derniere valeur connue, meme si le peripherique
         # passe en veille : le niveau ne repasse pas a "—".
@@ -454,6 +500,10 @@ class Overlay:
             if hist:
                 hist.clear()
                 self._history_dirty = True
+            # Une charge invalide la vitesse de decharge memorisee.
+            if key in self.last_est:
+                del self.last_est[key]
+                self._history_dirty = True
             return
         now = time.time()
         if hist:
@@ -478,6 +528,7 @@ class Overlay:
                 and now - self._last_history_save >= HISTORY_SAVE_INTERVAL):
             self.cfg["history"] = self.hist
             self.cfg["last_est"] = self.last_est
+            self.cfg["kb_batt_pct"] = self.kb_batt_pct
             save_config(self.cfg)
             self._history_dirty = False
             self._last_history_save = now
@@ -635,6 +686,7 @@ class Overlay:
             pass
         self.cfg["history"] = self.hist
         self.cfg["last_est"] = self.last_est
+        self.cfg["kb_batt_pct"] = self.kb_batt_pct
         save_config(self.cfg)
         try:
             self.mouse_reader.stop()

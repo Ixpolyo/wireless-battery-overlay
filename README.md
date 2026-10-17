@@ -98,7 +98,14 @@ keyboard label is the `KEYBOARD_LABEL` constant in the same file.
   percentage, so the estimate appears much sooner. When no discharge has been
   measured yet (battery on a flat plateau, first run), a rough nominal runtime
   is shown instead, in a dimmed colour; the measured value replaces it as soon
-  as a trend is detected.
+  as a trend is detected. Estimates are capped at a plausible maximum
+  (`MAX_FULL_HOURS`) so a nearly flat voltage cannot yield absurd values such as
+  "200 h at 20 %".
+- While the **keyboard is charging**, the cell voltage is inflated, which would
+  overestimate the percentage. The overlay therefore keeps the last
+  on-battery percentage (and for a few minutes after unplugging, while the
+  surface charge settles) and shows the ⚡ indicator. The mouse reports its
+  percentage directly, so it needs no such correction.
 
 The overlay reads the devices every 10 seconds in background threads and only
 repaints when a value actually changes.

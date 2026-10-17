@@ -100,6 +100,15 @@ Le libellé du clavier est la constante `KEYBOARD_LABEL` du même fichier.
   qu'aucune décharge n'a encore été mesurée (batterie sur un palier, première
   utilisation), une autonomie nominale approximative est affichée en couleur
   estompée ; la valeur mesurée la remplace dès qu'une tendance est détectée.
+  Les estimations sont plafonnées à un maximum plausible (`MAX_FULL_HOURS`)
+  pour qu'une tension quasi stable ne produise pas de valeurs absurdes comme
+  « 200 h à 20 % ».
+- Quand le **clavier est en charge**, la tension de la cellule est gonflée, ce
+  qui surestimerait le pourcentage. L'overlay conserve donc le dernier
+  pourcentage mesuré hors charge (et encore quelques minutes après le
+  débranchement, le temps que la tension de surface retombe) et affiche
+  l'indicateur ⚡. La souris renvoie son pourcentage directement : aucune
+  correction n'est nécessaire.
 
 L'overlay lit les périphériques toutes les 10 secondes dans des threads
 d'arrière-plan et ne redessine que lorsqu'une valeur change réellement.
